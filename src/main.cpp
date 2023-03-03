@@ -9,6 +9,11 @@ volatile bool flip = false;
 Pixel backbuffer[FB_WIDTH][FB_HEIGHT];
 Pixel frontbuffer[FB_WIDTH][FB_HEIGHT];
 
+int interp(int min, int max, float t) {
+    float v = (float)min + t * (float)(max-min);
+    return std::max(min,std::min(max,(int)v));
+}
+
 void hub75_flip () {
     flip = true; // TODO: rewrite to semaphore
 }
@@ -59,8 +64,13 @@ int main() {
 
     person_sensor_results_t prev_results = {};
 
-    Pixel foreground(255, 0,   0);
-    Pixel background(  0, 0, 255);
+    Pixel background(  32, 32, 32);
+    Pixel colors[PERSON_SENSOR_MAX_FACES_COUNT] = {
+        Pixel(255,  0,  0),
+        Pixel(  0,255,  0),
+        Pixel(  0,  0,255),
+        Pixel(255,255,  0),
+    };
 
     clear_back_buffer(background);
     clear_front_buffer(background);
@@ -76,19 +86,19 @@ int main() {
             if (results.num_faces == 0) {
                 printf("I see no faces\n");
             } else {
+                printf("I see %d faces\n", results.num_faces);
                 for (int i=0; i<results.num_faces; i++) {
-                    int left = results.faces[i].box_left;
-                    int right = results.faces[i].box_right;
-                    int top = results.faces[i].box_top;
-                    int bottom = results.faces[i].box_bottom;
-                    printf("face %d %d %d %d", left, right, top, bottom);
-                    for (int x = std::max(0,left);
-                         x <= std::min((int)(FB_WIDTH-1),right);
+                    float left = (float)results.faces[i].box_left / 255.f;
+                    float right = (float)results.faces[i].box_right / 255.f;
+                    float top = 1.f - (float)results.faces[i].box_top / 255.f;
+                    float bottom = 1.f - (float)results.faces[i].box_bottom / 255.f;
+                    for (int x = interp(0, FB_WIDTH, left);
+                         x <= interp(0, FB_WIDTH, right);
                          x++) {
-                        for (int y = std::max(0,top);
-                             y <= std::min((int)(FB_HEIGHT-1),bottom);
+                        for (int y = interp(0,FB_HEIGHT-1,bottom);
+                             y <= interp(0,FB_HEIGHT-1,top);
                              y++) {
-                            frontbuffer[x][y] = foreground;
+                            frontbuffer[x][y] = colors[i];
                         }
                     }
                 }
