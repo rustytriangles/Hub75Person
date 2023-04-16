@@ -13,7 +13,7 @@ include(pico_sdk_import)
 set(PICO_CXX_ENABLE_EXCEPTIONS 1)
 
 # Link the Project to a source file (step 4.6)
-add_executable(${OUTPUT_NAME} src/main.cpp src/pixel.cpp src/person_sensor.cpp)
+add_executable(${OUTPUT_NAME} src/main.cpp src/person_sensor.cpp)
 
 # Initalise the SDK
 pico_sdk_init()
@@ -23,6 +23,7 @@ target_link_libraries(${OUTPUT_NAME}
     pico_stdlib
     pico_multicore
     hardware_i2c
+    hub75
 )
 
 

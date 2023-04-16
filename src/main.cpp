@@ -1,13 +1,32 @@
-#include "display.hpp"
-#include "hub75util.hpp"
-#include "pixel.hpp"
-#include "person_sensor.hpp"
 #include <algorithm>
+#include <cstdio>
+#include "person_sensor.hpp"
+
+#include "hub75.hpp"
+
+const uint32_t FB_WIDTH = 256;
+const uint8_t FB_HEIGHT = 64;
+
+const uint32_t GRID_WIDTH = 128;
+const uint8_t GRID_HEIGHT = 128;
+
+std::pair<unsigned int,unsigned int> grid_to_framebuffer(uint32_t x,uint32_t y,
+                                     uint32_t grid_width, uint32_t grid_height,
+                                     unsigned int fb_width, unsigned int fb_height) {
+    unsigned int tx = (unsigned int)x;
+    unsigned int ty = (unsigned int)y;
+    if (ty < fb_height) {
+        return std::make_pair(tx,ty);
+    } else {
+        tx = fb_width - 1 - tx;
+        ty = (unsigned int)grid_height - 1 - ty;
+        return std::make_pair(tx,ty);
+    }
+}
+
+Hub75 hub75(FB_WIDTH, FB_HEIGHT, nullptr, PANEL_GENERIC, true);
 
 volatile bool flip = false;
-
-Pixel backbuffer[FB_WIDTH][FB_HEIGHT];
-Pixel frontbuffer[FB_WIDTH][FB_HEIGHT];
 
 int interp(int min, int max, float t) {
     float v = (float)min + t * (float)(max-min);
@@ -18,36 +37,8 @@ void hub75_flip () {
     flip = true; // TODO: rewrite to semaphore
 }
 
-void clear_back_buffer(const Pixel& color) {
-    for(auto x = 0u; x < FB_WIDTH; x++) {
-        for(auto y = 0u; y < FB_HEIGHT; y++) {
-            backbuffer[x][y] = color;
-        }
-    }
-}
-
-void clear_front_buffer(const Pixel& color) {
-    for(auto x = 0u; x < FB_WIDTH; x++) {
-        for(auto y = 0u; y < FB_HEIGHT; y++) {
-            frontbuffer[x][y] = color;
-        }
-    }
-}
-
-void hub75_display_update() {
-
-    // Ridiculous register write nonsense for the FM6126A-based 64x64 matrix
-    FM6126A_write_register(0b1111111111111110, 12);
-    FM6126A_write_register(0b0000001000000000, 13);
-
-    while (true) {
-        if (flip) {
-            memcpy((uint8_t *)backbuffer, (uint8_t *)frontbuffer, FB_WIDTH * FB_HEIGHT * sizeof(Pixel));
-            flip = false;
-        }
-
-        push_buffer(&backbuffer[0][0], FB_WIDTH, FB_HEIGHT);
-    }
+void __isr dma_complete() {
+    hub75.dma_complete();
 }
 
 int main() {
@@ -56,9 +47,7 @@ int main() {
 
     set_sys_clock_khz(200000, false);
 
-    init_pins();
-
-    multicore_launch_core1(hub75_display_update);
+    hub75.start(dma_complete);
 
     person_sensor_init();
 
@@ -72,8 +61,6 @@ int main() {
         Pixel(255,255,  0),
     };
 
-    clear_back_buffer(background);
-    clear_front_buffer(background);
     while (true) {
         person_sensor_results_t results = {};
         if (!person_sensor_read(&results)) {
@@ -81,35 +68,62 @@ int main() {
 
         } else if (results != prev_results) {
 
-            clear_front_buffer(background);
+            hub75.clear();
+
 
             if (results.num_faces == 0) {
                 printf("I see no faces\n");
             } else {
                 printf("I see %d faces\n", results.num_faces);
                 for (int i=0; i<results.num_faces; i++) {
-                    float left = (float)results.faces[i].box_left / 255.f;
-                    float right = (float)results.faces[i].box_right / 255.f;
-                    float top = 1.f - (float)results.faces[i].box_top / 255.f;
-                    float bottom = 1.f - (float)results.faces[i].box_bottom / 255.f;
-                    for (int x = interp(0, FB_WIDTH, left);
-                         x <= interp(0, FB_WIDTH, right);
-                         x++) {
-                        for (int y = interp(0,FB_HEIGHT-1,bottom);
-                             y <= interp(0,FB_HEIGHT-1,top);
-                             y++) {
-                            frontbuffer[x][y] = colors[i];
+                    // printf("face[%d] = %d,%d,%d,%d\n",
+                    //        i,
+                    //        (int)results.faces[i].box_right,(int)results.faces[i].box_left,
+                    //        (int)results.faces[i].box_top,(int)results.faces[i].box_bottom);
+                    float left = 1.f - (float)results.faces[i].box_right / 255.f;
+                    float right = 1.f - (float)results.faces[i].box_left / 255.f;
+                    float top = (float)results.faces[i].box_top / 255.f;
+                    float bottom = (float)results.faces[i].box_bottom / 255.f;
+                    printf("left = %f, right = %f, bottom = %f, top = %f\n",left,right,bottom,top);
+                    int xmin = interp(0, GRID_WIDTH-1, left);
+                    int xmax = interp(0, GRID_WIDTH-1, right);
+                    int ymin = interp(0, GRID_HEIGHT-1, top);
+                    int ymax = interp(0, GRID_HEIGHT-1, bottom);
+
+                    for (int y = ymin; y <= ymax; y++) {
+                        for (int x = xmin; x<= xmax; x++) {
+                            std::pair<uint,uint> fb_index = grid_to_framebuffer(x,y,GRID_WIDTH,GRID_HEIGHT,FB_WIDTH,FB_HEIGHT);
+                            hub75.set_color(fb_index.first, fb_index.second, colors[i]);
                         }
                     }
-                }
 
+                    // Debugging the case where the Y coord gets weird at the bottom
+                    // for (int x = xmin; x<= xmax; x++) {
+                    //     int y = ymin;
+                    //     std::pair<uint,uint> fb_index = grid_to_framebuffer(x,y,GRID_WIDTH,GRID_HEIGHT,FB_WIDTH,FB_HEIGHT);
+                    //     if (fb_index.first >= 0 && fb_index.first < FB_WIDTH && fb_index.second >= 0 && fb_index.second < FB_HEIGHT) {
+                    //         hub75.set_color(fb_index.first, fb_index.second, colors[i]);
+                    //     } else {
+                    //         printf("bad coord %d,%d\n",fb_index.first,fb_index.second);
+                    //     }
+                    // }
+                    // for (int y = ymin; y <= ymax; y++) {
+                    //     int x = xmin;
+                    //     std::pair<uint,uint> fb_index = grid_to_framebuffer(x,y,GRID_WIDTH,GRID_HEIGHT,FB_WIDTH,FB_HEIGHT);
+                    //     if (fb_index.first >= 0 && fb_index.first < FB_WIDTH && fb_index.second >= 0 && fb_index.second < FB_HEIGHT) {
+                    //         hub75.set_color(fb_index.first, fb_index.second, colors[i]);
+                    //     } else {
+                    //         printf("bad coord %d,%d\n",fb_index.first,fb_index.second);
+                    //     }
+                    // }
+
+                }
             }
 
-
             prev_results = results;
-            hub75_flip();
+            hub75.flip(true);
         }
-        sleep_ms(1);
+        sleep_ms(10);
     }
 }
 
